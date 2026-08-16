@@ -7,7 +7,6 @@ import requests
 import pandas as pd
 from datetime import datetime
 
-# Адрес backend-сервера
 API_BASE = "http://localhost:8000"
 
 st.set_page_config(
@@ -23,7 +22,6 @@ st.caption("Внутренний инструмент аналитика. Не �
 # ==================== Проверка доступности backend ====================
 
 def check_backend() -> bool:
-    """Проверяет, запущен ли FastAPI сервер."""
     try:
         resp = requests.get(f"{API_BASE}/health", timeout=3)
         return resp.status_code == 200
@@ -44,17 +42,27 @@ st.success("Backend подключен.")
 st.markdown("---")
 
 
-# ==================== Сайдбар: создание прогноза ====================
+# ==================== Загрузка справочника активов ====================
 
-st.sidebar.header("Создание нового прогноза")
-
-# Загрузка списка активов
 assets_response = requests.get(f"{API_BASE}/assets")
 assets = assets_response.json()
+
+# Маппинг для отображения в таблицах
+asset_display = {
+    asset["id"]: f"{asset['symbol']}/{asset['quote_currency'].upper()}"
+    for asset in assets
+}
+
+# Для сайдбара: полное название
 asset_options = {
     f"{asset['symbol']}/{asset['quote_currency'].upper()} — {asset['name']}": asset["id"]
     for asset in assets
 }
+
+
+# ==================== Сайдбар: создание прогноза ====================
+
+st.sidebar.header("Создание нового прогноза")
 
 selected_asset_name = st.sidebar.selectbox(
     "Выберите актив",
@@ -71,7 +79,8 @@ if st.sidebar.button("Сформировать прогноз", type="primary"):
             st.sidebar.success("Прогноз создан и активирован.")
             st.rerun()
         else:
-            st.sidebar.error(f"Ошибка: {resp.json().get('detail', 'неизвестная ошибка')}")
+            error_detail = resp.json().get("detail", "неизвестная ошибка")
+            st.sidebar.error(f"Ошибка: {error_detail}")
 
 
 # ==================== Реестр прогнозов ====================
@@ -90,7 +99,6 @@ with col_refresh:
     if st.button("Обновить"):
         st.rerun()
 
-# Формирование запроса
 params = {} if status_filter == "Все" else {"status": status_filter}
 predictions_response = requests.get(f"{API_BASE}/predictions", params=params)
 predictions = predictions_response.json()
@@ -98,16 +106,18 @@ predictions = predictions_response.json()
 if predictions:
     df = pd.DataFrame(predictions)
     
-    # Форматирование для читаемости
+    # Добавляем читаемое название актива и валюту
+    df["Актив"] = df["asset_id"].map(asset_display)
+    df["Валюта"] = df["quote_currency"].str.upper()
+    
+    # Форматирование дат и числовых полей
     df["created_at"] = pd.to_datetime(df["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
     df["confidence"] = df["confidence"].apply(lambda x: f"{x:.0f}%" if x else "-")
     df["score"] = df["score"].apply(lambda x: f"{x:.0f}" if x else "-")
     
-    # Переименование колонок для отображения
+    # Подготовка таблицы для отображения
     df_display = df.rename(columns={
         "id": "ID",
-        "asset_id": "Актив ID",
-        "quote_currency": "Валюта",
         "status": "Статус",
         "verdict": "Вердикт",
         "confidence": "Уверенность",
@@ -116,8 +126,16 @@ if predictions:
         "created_at": "Создан"
     })
     
-    display_cols = ["ID", "Актив ID", "Статус", "Вердикт", "Уверенность", "Риск", "Score", "Создан"]
-    st.dataframe(df_display[display_cols], hide_index=True, use_container_width=True)
+    display_cols = [
+        "ID", "Актив", "Валюта", "Статус", "Вердикт",
+        "Уверенность", "Риск", "Score", "Создан"
+    ]
+    
+    st.dataframe(
+        df_display[display_cols],
+        hide_index=True,
+        use_container_width=True
+    )
 else:
     st.info("Прогнозы не найдены. Создайте первый прогноз в сайдбаре.")
 
@@ -134,7 +152,6 @@ if predictions:
         format_func=lambda x: f"Прогноз #{x}"
     )
     
-    # Загрузка детальной информации
     detail_response = requests.get(f"{API_BASE}/predictions/{pred_id}")
     if detail_response.status_code != 200:
         st.error("Не удалось загрузить прогноз.")
@@ -142,13 +159,19 @@ if predictions:
     
     pred = detail_response.json()
     
+    # Получаем информацию об активе
+    asset_id = pred["asset_id"]
+    asset_info = next((a for a in assets if a["id"] == asset_id), None)
+    asset_label = f"{asset_info['symbol']}/{asset_info['quote_currency'].upper()}" if asset_info else f"ID {asset_id}"
+    
     # Основные метрики
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Статус", pred["status"])
-    col2.metric("Вердикт", pred["verdict"] or "-")
-    col3.metric("Уверенность", f"{pred['confidence']:.0f}%" if pred["confidence"] else "-")
-    col4.metric("Риск", pred["risk_level"] or "-")
-    col5.metric("Score", f"{pred['score']:.0f}" if pred["score"] else "-")
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1.metric("Актив", asset_label)
+    col2.metric("Валюта", pred.get("quote_currency", "-").upper())
+    col3.metric("Статус", pred["status"])
+    col4.metric("Вердикт", pred["verdict"] or "-")
+    col5.metric("Уверенность", f"{pred['confidence']:.0f}%" if pred["confidence"] else "-")
+    col6.metric("Риск", pred["risk_level"] or "-")
     
     # Аргументация
     st.subheader("Аргументация модели")
@@ -171,7 +194,11 @@ if predictions:
             "value": "Значение",
             "collected_at": "Собрано"
         })
-        st.dataframe(df_raw[["Источник", "Метрика", "Значение", "Собрано"]], hide_index=True, use_container_width=True)
+        st.dataframe(
+            df_raw[["Источник", "Метрика", "Значение", "Собрано"]],
+            hide_index=True,
+            use_container_width=True
+        )
     else:
         st.info("Сырые данные отсутствуют.")
     
@@ -189,7 +216,11 @@ if predictions:
             "reason": "Причина",
             "changed_at": "Изменён"
         })
-        st.dataframe(df_history[["Из статуса", "В статус", "Причина", "Изменён"]], hide_index=True, use_container_width=True)
+        st.dataframe(
+            df_history[["Из статуса", "В статус", "Причина", "Изменён"]],
+            hide_index=True,
+            use_container_width=True
+        )
     else:
         st.info("История изменений пуста.")
     
@@ -219,7 +250,8 @@ if predictions:
             st.success(f"Статус изменён на '{new_status}'.")
             st.rerun()
         else:
-            st.error(f"Ошибка: {resp.json().get('detail', 'неизвестная ошибка')}")
+            error_detail = resp.json().get("detail", "неизвестная ошибка")
+            st.error(f"Ошибка: {error_detail}")
 else:
     st.info("Нет прогнозов для просмотра.")
 
