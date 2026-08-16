@@ -10,14 +10,12 @@ from backend.db import init_db, engine, Base
 @pytest.fixture(scope="function")
 def client():
     """Создаёт тестовый клиент с чистой БД для каждого теста."""
-    # Пересоздаём таблицы
     Base.metadata.drop_all(bind=engine)
     init_db()
     
     with TestClient(app) as c:
         yield c
     
-    # Очистка после теста
     Base.metadata.drop_all(bind=engine)
 
 
@@ -29,8 +27,14 @@ class TestAssetsAPI:
         assert response.status_code == 200
         
         data = response.json()
-        assert len(data) == 3
-        assert data[0]["name"] == "Bitcoin (BTC)"
+        assert len(data) >= 3
+        
+        # Проверяем наличие новых полей
+        first_asset = data[0]
+        assert "symbol" in first_asset
+        assert "quote_currency" in first_asset
+        assert first_asset["symbol"] == "BTC"
+        assert first_asset["quote_currency"] == "usd"
     
     def test_health_check(self, client):
         response = client.get("/health")
@@ -44,12 +48,13 @@ class TestPredictionsAPI:
     def test_create_prediction(self, client):
         response = client.post("/predictions", params={"asset_id": 1})
         
-        # Может вернуть 201 или 502 (если внешний API недоступен)
+        # Может вернуть 201 или 502 (если внешний API недоступен в CI)
         assert response.status_code in (201, 502)
         
         if response.status_code == 201:
             data = response.json()
             assert data["asset_id"] == 1
+            assert data["quote_currency"] == "usd"
             assert data["status"] == "active"
     
     def test_create_prediction_invalid_asset(self, client):
@@ -66,5 +71,4 @@ class TestPredictionsAPI:
             "/predictions/1/status",
             json={"new_status": "invalid_status"}
         )
-        # Прогноз не существует или недопустимый статус
         assert response.status_code in (404, 400)
